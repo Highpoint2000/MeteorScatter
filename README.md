@@ -1,7 +1,10 @@
-# Airplane Scatter
+# Meteor Scatter Plugin
 Predicts and visualizes real-time airplane scatter opportunities for FM radio reception by combining live ADS-B flight tracking with transmitter databases and elevation profiles.
 
-<img width="2094" height="826" alt="grafik" src="https://github.com/user-attachments/assets/4cb9993f-6bc8-46d4-8971-4d57121ce4e6" />
+<img width="500" height="300" alt="Screenshot 2026-04-16 234152" src="https://github.com/user-attachments/assets/709184a7-ff14-455d-96ad-f01c344abf55" />
+<img width="450" height="400" alt="Screenshot 2026-04-16 234427" src="https://github.com/user-attachments/assets/c6a0d61d-2bea-4bca-a7f3-54244530cdc7" />
+
+
 
 ## Version 1.0 (Only compatible with FM DX Webserver version 1.4.0 and above !!!)
 
