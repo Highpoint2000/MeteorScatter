@@ -93,6 +93,7 @@
             mapTopN:    getInt(localStorage.getItem('ms_map_topn'), 120),
 			
 			beamwidth: getInt(localStorage.getItem('ms_beamwidth'), 50),
+			staticAzimuth: getInt(localStorage.getItem('ms_static_azimuth'), 180),
 
             sunWeighting:   getInt(localStorage.getItem('ms_sun_weighting'), 1), 
             strictMinScore: getInt(localStorage.getItem('ms_strict_minscore'), 0), 
@@ -1297,13 +1298,15 @@
         score += breakdown.erpBonus;
 
         // --- 3. Antenna Beamwidth & Rotor Penalty ---
-        if (rotorAzDeg !== null && rotorAzDeg !== undefined) {
-            const diff = Math.abs(txBrg - rotorAzDeg);
+        const effectiveAzimuth = (rotorAzDeg !== null && rotorAzDeg !== undefined) ? rotorAzDeg : (S.staticAzimuth || 180);
+
+        if (effectiveAzimuth !== null && effectiveAzimuth !== undefined) {
+            const diff = Math.abs(txBrg - effectiveAzimuth);
             const adiff = Math.min(diff, 360 - diff);
             const halfBeam = (S.beamwidth || 50) / 2;
             
             if (adiff > halfBeam) {
-                // Drastic gain penalty for being outside the main lobe (e.g., -2.5 points per degree off-beam)
+                // Drastic gain penalty for being outside the main lobe (-2.5 points per degree off-beam)
                 breakdown.rotorPen = -((adiff - halfBeam) * 2.5);
                 score += breakdown.rotorPen;
             }
@@ -1452,13 +1455,15 @@
         if (!mapInstance || !rotorLayer || !currentRx) return;
         rotorLayer.clearLayers();
 
-        if (rotorAzDeg === null || rotorAzDeg === undefined) return;
+        const isActiveRotor = (rotorAzDeg !== null && rotorAzDeg !== undefined);
+        const effectiveAzimuth = isActiveRotor ? rotorAzDeg : (S.staticAzimuth || 180);
+
+        if (effectiveAzimuth === null || effectiveAzimuth === undefined) return;
 
         const halfBeam = (S.beamwidth || 50) / 2;
         
-        const pCenter = deadReckonRad(currentRx.lat, currentRx.lon, rotorAzDeg, 2000);
-        const pLeft = deadReckonRad(currentRx.lat, currentRx.lon, (rotorAzDeg - halfBeam + 360) % 360, 2000);
-        const pRight = deadReckonRad(currentRx.lat, currentRx.lon, (rotorAzDeg + halfBeam) % 360, 2000);
+        const pLeft = deadReckonRad(currentRx.lat, currentRx.lon, (effectiveAzimuth - halfBeam + 360) % 360, 2000);
+        const pRight = deadReckonRad(currentRx.lat, currentRx.lon, (effectiveAzimuth + halfBeam) % 360, 2000);
 
         // 1. Filled area (Cone/Wedge)
         const beamArea = L.polygon([
@@ -1469,10 +1474,8 @@
             color: 'transparent',
             fillColor: '#ff0000',
             fillOpacity: 0.15,
-            interactive: false // <-- Crucial: Allows mouse events to pass through
+            interactive: false
         }).addTo(rotorLayer);
-        
-        // Push visually behind the green hotspots
         beamArea.bringToBack();
 
         // 2. Dashed boundary lines
@@ -1486,11 +1489,14 @@
         }).addTo(rotorLayer);
         rightBorder.bringToBack();
 
-        // 3. Solid center line
-        const centerLine = L.polyline([[currentRx.lat, currentRx.lon], [pCenter.lat, pCenter.lon]], {
-            color: '#ff0000', weight: 3, opacity: 0.85, interactive: false
-        }).addTo(rotorLayer);
-        centerLine.bringToBack();
+        // 3. Solid center line (ONLY if active rotor is turning)
+        if (isActiveRotor) {
+            const pCenter = deadReckonRad(currentRx.lat, currentRx.lon, effectiveAzimuth, 2000);
+            const centerLine = L.polyline([[currentRx.lat, currentRx.lon], [pCenter.lat, pCenter.lon]], {
+                color: '#ff0000', weight: 3, opacity: 0.85, interactive: false
+            }).addTo(rotorLayer);
+            centerLine.bringToBack();
+        }
     }
 
     // ── UI ───────────────────────────────────────────────────────────────
@@ -1528,6 +1534,20 @@
                 </div>
 
                 <h5 style="margin-top:10px; cursor: move;">
+                    <span style="color:#ffaa00; pointer-events: none;">Antenna & Rotor</span>
+                </h5>
+                <div class="ms-setting-row">
+                    <label>Antenna Beamwidth</label>
+                    <input type="number" id="ms-s-beamwidth" value="${S.beamwidth}">
+                    <span class="ms-setting-unit">°</span>
+                </div>
+                <div class="ms-setting-row">
+                    <label>Static Azimuth (No Rotor)</label>
+                    <input type="number" id="ms-s-static-az" value="${S.staticAzimuth}">
+                    <span class="ms-setting-unit">°</span>
+                </div>
+
+                <h5 style="margin-top:10px; cursor: move;">
                     <span style="color:#ffaa00; pointer-events: none;">Display & Scoring</span>
                 </h5>
                 <div class="ms-setting-row"><label>Target candidates</label><input type="number" id="ms-s-topn" value="${S.targetTopN}"><span class="ms-setting-unit"></span></div>
@@ -1541,22 +1561,20 @@
                     </select>
                     <span class="ms-setting-unit"></span>
                 </div>
-                
-                <div class="ms-setting-row"><label>Antenna Beamwidth</label><input type="number" id="ms-s-beamwidth" value="${S.rxBeamwidth}"><span class="ms-setting-unit">deg</span></div>
 
                 <h5 style="margin-top:10px; cursor: move;">
                     <span style="color:#ffaa00; pointer-events: none;">Terrain</span>
                 </h5>
 
                 <div class="ms-setting-row">
-                    <label>Terrain Blocking Check</label>
+                    <label>Real Terrain Blocking</label>
                     <select id="ms-s-terrain">
                         <option value="1" ${S.useTerrainBlocking ? 'selected' : ''}>On</option>
                         <option value="0" ${!S.useTerrainBlocking ? 'selected' : ''}>Off</option>
                     </select>
                     <span class="ms-setting-unit"></span>
                 </div>
-				
+
                 <div class="ms-setting-row"><label>RX antenna height AGL</label><input type="number" id="ms-s-rx-agl" value="${S.rxAglM}"><span class="ms-setting-unit">m</span></div>
                 <div class="ms-setting-row"><label>Assumed TX antenna height AGL</label><input type="number" id="ms-s-tx-agl" value="${S.txAglM}"><span class="ms-setting-unit">m</span></div>
 
@@ -1988,8 +2006,9 @@
         const cutoffStr = `${Math.round(cutoff)}%`;
         const rxTerrStr = fmtAlt(rxTerrainM || 0);
         const sunStr = `${Math.round(sunAltDeg)}°`;
-        const rotorStr = (rotorAzDeg === null || rotorAzDeg === undefined) ? '—' : `${Math.round(rotorAzDeg)}°`;
-
+        const isActiveRotor = (rotorAzDeg !== null && rotorAzDeg !== undefined);
+        const rotorStr = isActiveRotor ? `${Math.round(rotorAzDeg)}°` : `${Math.round(S.staticAzimuth || 180)}° (Static)`;
+				
         let showerStr = 'Sporadic (Background)';
         if (activeShower) {
             const p = activeShower.peak;
@@ -2236,6 +2255,7 @@
             S.autoRightAlign = document.getElementById('ms-s-rightalign').checked;
 			
 			S.beamwidth = parseInt(document.getElementById('ms-s-beamwidth').value) || 50;
+			S.staticAzimuth = parseInt(document.getElementById('ms-s-static-az').value) || 180;
 
             localStorage.setItem('ms_min_dist', S.minDistKm);
             localStorage.setItem('ms_max_dist', S.maxDistKm);
@@ -2262,6 +2282,7 @@
             localStorage.setItem('ms_auto_right_align', S.autoRightAlign);
 
             localStorage.setItem('ms_beamwidth', S.beamwidth);
+			localStorage.setItem('ms_static_azimuth', S.staticAzimuth);
 
             document.getElementById('ms-settings-panel').style.display = 'none';
             
