@@ -1,5 +1,5 @@
 # Meteor Scatter Plugin
-Predicts and visualizes real-time airplane scatter opportunities for FM radio reception by combining live ADS-B flight tracking with transmitter databases and elevation profiles.
+Predicts and visualizes optimal real-time hotspots for receiving distant FM radio signals reflected by ionized meteor trails.
 
 <img width="500" height="300" alt="Screenshot 2026-04-16 234152" src="https://github.com/user-attachments/assets/709184a7-ff14-455d-96ad-f01c344abf55" />
 <img width="450" height="400" alt="Screenshot 2026-04-16 234427" src="https://github.com/user-attachments/assets/c6a0d61d-2bea-4bca-a7f3-54244530cdc7" />
