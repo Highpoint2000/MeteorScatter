@@ -1,15 +1,15 @@
 /////////////////////////////////////////////////////////////////
 //                                                             //
-//  METEOR SCATTER CLIENT PLUGIN FOR FM-DX-WEBSERVER (V1.0)    //
+//  METEOR SCATTER CLIENT PLUGIN FOR FM-DX-WEBSERVER (V1.1)    //
 //                                                             //
-//  by Highpoint                last update: 2026-04-16        //
+//  by Highpoint                last update: 2026-04-17        //
 //                                                             //
 //  https://github.com/Highpoint2000/MeteorScatter             //
 //                                                             //
 /////////////////////////////////////////////////////////////////
 
 (() => {
-    const pluginVersion = "1.0";
+    const pluginVersion = "1.1";
     const pluginName    = "Meteor Scatter";
     const pluginHomepageUrl = "https://github.com/Highpoint2000/MeteorScatter/releases";
     const pluginUpdateUrl   = "https://raw.githubusercontent.com/Highpoint2000/MeteorScatter/refs/heads/main/MeteorScatter/meteorscatter.js";
@@ -58,6 +58,7 @@
 
     const ELEVATION_API_LOCAL = basePath + '/api/meteorscatter/elevation?locations=';
     const FMDX_API_ENDPOINT   = basePath + '/api/meteorscatter/fmdx';
+    const LIVE_RADAR_ENDPOINT = basePath + '/api/meteorscatter/live_radar';
 
     const PI_180 = Math.PI / 180;
 
@@ -90,9 +91,11 @@
 
             targetTopN: getInt(localStorage.getItem('ms_target_topn'), 60),
             mapTopN:    getInt(localStorage.getItem('ms_map_topn'), 120),
+			
+			beamwidth: getInt(localStorage.getItem('ms_beamwidth'), 50),
 
-            sunWeighting:   getInt(localStorage.getItem('ms_sun_weighting'), 1), // 0/1
-            strictMinScore: getInt(localStorage.getItem('ms_strict_minscore'), 0), // 0/1
+            sunWeighting:   getInt(localStorage.getItem('ms_sun_weighting'), 1), 
+            strictMinScore: getInt(localStorage.getItem('ms_strict_minscore'), 0), 
             
             filterMode:     localStorage.getItem('ms_filter_mode') || 'none',
 
@@ -100,19 +103,22 @@
             txAglM: getInt(localStorage.getItem('ms_tx_agl_m'), 150),
             pathPoints: getInt(localStorage.getItem('ms_path_pts'), 75),
 
-            meteorModel: localStorage.getItem('ms_meteor_model') || 'single', // 'single' | 'multi'
+            meteorModel: localStorage.getItem('ms_meteor_model') || 'single', 
             meteorAltKm: getInt(localStorage.getItem('ms_meteor_alt_km'), 95),
 
-            groupCollapse: getInt(localStorage.getItem('ms_group_collapse'), 1), // default to 1 (collapsed)
+            groupCollapse: getInt(localStorage.getItem('ms_group_collapse'), 1),
 
             useMetric: localStorage.getItem('ms_use_metric') !== 'false',
             autoRightAlign: localStorage.getItem('ms_auto_right_align') === 'true',
+
+            rxBeamwidth: getInt(localStorage.getItem('ms_rx_beamwidth'), 50),
+            useTerrainBlocking: getInt(localStorage.getItem('ms_use_terrain_blocking'), 1)
         };
     }
 
     let S = loadSettings();
 
-    // ── UI state ──────────────────────────────────────────────────────────
+    // ── UI state & Data ───────────────────────────────────────────────────
     let mapActive = false, mapInstance = null;
     let lineLayer = null, txLayer = null, hotspotLayer = null, rxMarker = null, radiantLayer = null;
     let rotorLayer = null;
@@ -130,7 +136,6 @@
 
     let rxTerrainM = null;
     let _elevCache = {};
-    let _pathElevCache = {};
 
     let rotorAzDeg = null;
     let ws = null;
@@ -150,6 +155,9 @@
     let lastMouseX = 0;
     let profScaleY = 1.0;
 
+    let liveRadarMultiplier = 1.0;
+    let liveRadarStatus = "Normal";
+
     // ── Utility Functions ───────────────────────────────────────────────
     function fmtDist(km) {
         if (S.useMetric) return Math.round(km) + ' km';
@@ -158,6 +166,34 @@
     function fmtAlt(m) {
         if (S.useMetric) return Math.round(m) + ' m';
         return Math.round(m * 3.28084) + ' ft';
+    }
+
+    function formatBreakdown(b) {
+        let s = `Score Breakdown:\n`;
+        s += `Base Score: ${b.base.toFixed(1)}\n`;
+        s += `Distance Factor: ${b.distPen > 0 ? '+' : ''}${b.distPen.toFixed(1)}\n`;
+        s += `ERP Factor: +${b.erpBonus.toFixed(1)}\n`;
+        
+        if (b.rotorPen < 0) {
+            s += `Off-Beam Penalty: ${b.rotorPen.toFixed(1)}\n`;
+        }
+        if (b.terrainPen < 0) {
+            s += `Terrain Blocking: ${b.terrainPen.toFixed(1)}\n`;
+        }
+        
+        if (b.showerMode) {
+            s += `Shower Alignment: x${b.showerAlign.toFixed(2)}\n`;
+            s += `Shower Elevation: x${b.showerElev.toFixed(2)}\n`;
+            s += `Shower Peak ZHR Factor: x${b.showerZhr.toFixed(2)}\n`;
+        } else {
+            s += `Sporadic (Background) Factor: x${b.sporadic.toFixed(2)}\n`;
+        }
+        
+        if (b.sun !== 1.0) {
+            s += `Sun Weighting: x${b.sun.toFixed(2)}\n`;
+        }
+        
+        return s;
     }
 
     function applyRightAlign(active) {
@@ -190,6 +226,21 @@
             }
         }
     }
+
+    // ── Live Radar Fetcher ───────────────────────────────────────────────
+    async function fetchLiveRadar() {
+        try {
+            const r = await fetch(LIVE_RADAR_ENDPOINT + "?t=" + Date.now());
+            if (r.ok) {
+                const data = await r.json();
+                liveRadarMultiplier = data.multiplier || 1.0;
+                liveRadarStatus = data.status || "Normal";
+            }
+        } catch (e) {
+            console.warn("[Meteor Scatter] Could not fetch live radar data:", e);
+        }
+    }
+    setInterval(fetchLiveRadar, 300000); // 5 minutes
 
     // ── Data loading ─────────────────────────────────────────────────────
     const COUNTRY_LIST_URL = 'https://tef.noobish.eu/logos/scripts/js/countryList.js';
@@ -228,7 +279,6 @@
 
             return lookup;
         } catch(e) {
-            console.warn(`[${pluginName}] Failed to load country list:`, e);
             return {};
         }
     }
@@ -335,7 +385,7 @@
         }
     }
 
-    // ── WebSocket (DataPlugins + Rotor) ───────────────────────────────────
+    // ── WebSocket (DataPlugins & Rotor) ──────────────────────────
     async function fetchIpAddress() {
         const host = currentUrl.hostname;
         if (/^(\d{1,3}\.){3}\d{1,3}$/.test(host)) return host;
@@ -376,36 +426,43 @@
 
             ws = new WebSocket(wsUrl);
             ws.addEventListener('open', async () => {
-                console.log(`[${pluginName}] DataPlugins WS opened. Fetching IP...`);
                 await sendRotorRequest();
             });
 
             ws.addEventListener('message', evt => {
                 try {
                     const d = JSON.parse(evt.data);
+                    
                     if(d.type === 'GPS' && d.value?.status === 'active'){
                         gpsLat = parseFloat(d.value.lat); gpsLon = parseFloat(d.value.lon);
                     }
                     if(d.type === 'Rotor'){
                         if (d.value === 'request' && d.clientId === clientId && d._auth) {
                             isAdminLoggedIn = d._auth.admin === true; isTuneLoggedIn  = d._auth.tune  === true;
-                            console.log(`[${pluginName}] Auth updated: Admin=${isAdminLoggedIn}, Tune=${isTuneLoggedIn}`);
                         }
                         if (d.lock !== undefined) isLockAuthenticated = d.lock;
                         if (d.value !== undefined && d.value !== 'request' && d.source === '127.0.0.1') {
                             const pos = parseFloat(d.value);
                             if(!isNaN(pos) && pos >= 0 && pos <= 360){
+                                let oldAz = rotorAzDeg;
                                 rotorAzDeg = pos === 360 ? 0 : pos;
                                 renderRotorLine();
                                 const el = document.getElementById('ms-rotor-val');
                                 if(el) el.textContent = `${Math.round(rotorAzDeg)}°`;
+                                
+                                // Dynamically recalculate scores and update UI if rotor moved significantly
+                                if (oldAz !== null && Math.abs(oldAz - rotorAzDeg) > 1) {
+                                    if(window._msRotorUpdateTimer) clearTimeout(window._msRotorUpdateTimer);
+                                    window._msRotorUpdateTimer = setTimeout(() => {
+                                        updateData();
+                                    }, 800); // 800ms debounce
+                                }
                             }
                         }
-                    }
-                } catch(e) { console.warn(`[${pluginName}] Error parsing WS message:`, e); }
+					}
+                } catch(e) {}
             });
             ws.addEventListener('close', () => {
-                console.log(`[${pluginName}] DataPlugins WS closed. Reconnecting in 5s...`);
                 ws = null;
                 setTimeout(() => { if (mapActive) connectDataPluginsWebSocket(); }, 5000);
             });
@@ -506,13 +563,6 @@
         }
         #ms-profile-y-zoom::-webkit-slider-thumb:hover { background: #fff; }
         
-        .ms-sub-header {
-            display: flex !important; flex-wrap: nowrap !important; align-items: center !important;
-            padding: 7px 14px !important; background: var(--color-2, #162032) !important;
-            border-bottom: 1px solid #1e3050 !important;
-            min-height: 38px !important; flex-shrink: 0 !important; box-sizing: border-box !important;
-            width: 100% !important;
-        }
         .ms-sub-title {
             font-size: 13px !important; font-weight: bold !important; color: #ffaa00 !important;
             white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important;
@@ -527,7 +577,7 @@
     `;
     document.head.appendChild(style);
 
-    // ── Geo helpers ────────────────────────────────────────────────────────
+    // ── Geo helpers ───────────────────────────────────────────────────────
     function haversineKm(lat1, lon1, lat2, lon2) {
         const dLat = (lat2 - lat1) * PI_180, dLon = (lon2 - lon1) * PI_180;
         const a = Math.sin(dLat / 2) ** 2
@@ -559,6 +609,11 @@
         };
     }
 
+    function angleDiff(a, b) {
+        const diff = Math.abs(a - b) % 360;
+        return diff > 180 ? 360 - diff : diff;
+    }
+
     function gaussianAlignment(minDiffDeg, beamwidthDeg = 45) {
         const x = minDiffDeg / Math.max(1e-6, beamwidthDeg);
         return Math.exp(-(x * x));
@@ -574,6 +629,8 @@
         }
         return pts;
     }
+
+    function toDeg(rad) { return rad * 180 / Math.PI; }
 
     // ── Astronomy ─────────────────────────────────────────────────────────
     function getActiveShower(date) {
@@ -654,8 +711,19 @@
         h = ((h % 24) + 24) % 24;
         return h;
     }
+    
+    // Calculate how many days separate two [month, day] arrays (ignoring year boundaries simplistically for peak distances)
+    function daysBetweenMMDD(m1, d1, m2, d2) {
+        const date1 = new Date(2024, m1 - 1, d1);
+        let date2 = new Date(2024, m2 - 1, d2);
+        // Handle wrap-around for end of year
+        if (m2 < m1 && (m1 - m2) > 6) date2 = new Date(2025, m2 - 1, d2);
+        if (m1 < m2 && (m2 - m1) > 6) date2 = new Date(2023, m2 - 1, d2);
+        
+        return Math.abs((date2 - date1) / (1000 * 60 * 60 * 24));
+    }
 
-    // ── Data loading ──────────────────────────────────────────────────────
+    // ── Data loading ─────────────────────────────────────────────────────
     async function loadTxDatabase(lat, lon) {
         const r = await fetch(`${FMDX_API_ENDPOINT}?qth=${lat},${lon}&radius=${S.maxDistKm}&erp=${S.minErpKw}`);
         if (!r.ok) throw new Error('API Error');
@@ -700,15 +768,85 @@
         }
     }
     
+    // New: Calculate physical horizon for candidates
+    async function calculateHorizonBlocking(rx, candidates) {
+        if (!S.useTerrainBlocking) return;
+        const pairsToFetch = [];
+        const candRefs = [];
+        
+        candidates.forEach(c => {
+            // Check horizon at 3km and 10km along the path
+            const p3 = deadReckonRad(rx.lat, rx.lon, c.txBrg, 3);
+            const p10 = deadReckonRad(rx.lat, rx.lon, c.txBrg, 10);
+            pairsToFetch.push(p3, p10);
+            candRefs.push(c);
+        });
+
+        // Batch fetch (API handles chunking internally/via server proxy)
+        const elevations = await fetchElevationBatchLatLon(pairsToFetch);
+        const rxAlt = (rxTerrainM || 0) + S.rxAglM;
+
+        for (let i = 0; i < candRefs.length; i++) {
+            const c = candRefs[i];
+            const e3 = elevations[i * 2]?.elevation || 0;
+            const e10 = elevations[i * 2 + 1]?.elevation || 0;
+            
+            // Calculate take-off angle required to clear the terrain at 3km and 10km
+            const ang3 = toDeg(Math.atan2(e3 - rxAlt, 3000));
+            const ang10 = toDeg(Math.atan2(e10 - rxAlt, 10000));
+            const maxHorizonAng = Math.max(ang3, ang10);
+
+            if (maxHorizonAng > c.elevAngleDeg) {
+                c.breakdown.terrainBlock = true;
+                c.score = c.score * 0.15; // Massive penalty for being physically blocked
+            }
+        }
+    }
+
+    // ── Persistent Path Elevation Cache (LRU + TTL) ───────────────────────
+    const PATH_CACHE_KEY = 'ms_path_cache';
+    const PATH_CACHE_TTL = 6 * 60 * 60 * 1000; // 6 Hours
+    const PATH_CACHE_MAX = 50;
+
+    function loadPathCache() {
+        try {
+            const c = JSON.parse(localStorage.getItem(PATH_CACHE_KEY));
+            return c || {};
+        } catch(e) { 
+            return {}; 
+        }
+    }
+
+    function savePathCache(cache) {
+        const keys = Object.keys(cache).sort((a, b) => cache[b].ts - cache[a].ts);
+        if (keys.length > PATH_CACHE_MAX) {
+            keys.slice(PATH_CACHE_MAX).forEach(k => delete cache[k]);
+        }
+        try { 
+            localStorage.setItem(PATH_CACHE_KEY, JSON.stringify(cache)); 
+        } catch(e) {
+            console.warn('[Meteor Scatter] Failed to save path cache:', e);
+        }
+    }
+
     async function fetchPathElevation(rxLat, rxLon, txLat, txLon, txKey) {
-        const cacheKey = rxLat.toFixed(2)+'_'+rxLon.toFixed(2)+'_'+txKey;
-        if (_pathElevCache[cacheKey]) return _pathElevCache[cacheKey];
+        const rxKey = rxLat.toFixed(1) + '_' + rxLon.toFixed(1);
+        const cacheKey = rxKey + '_' + txKey;
+        const cache = loadPathCache();
+        
+        if (cache[cacheKey] && (Date.now() - cache[cacheKey].ts < PATH_CACHE_TTL)) {
+            const cachedData = cache[cacheKey];
+            const elevs = cachedData.elevs;
+            elevs.isFallback = cachedData.isFallback;
+            return elevs;
+        }
 
         const NUM_PTS = 75; 
         const pts = generatePathPoints(rxLat, rxLon, txLat, txLon, NUM_PTS);
         const locs = pts.map(p => p.lat.toFixed(4) + ',' + p.lon.toFixed(4)).join('|');
         
         let elevs = null;
+        let isFallback = false;
 
         try {
             const r = await fetch(ELEVATION_API_LOCAL + encodeURIComponent(locs));
@@ -719,15 +857,22 @@
                 }
             }
         } catch(e) {
-            console.warn('[Meteor Scatter] Server cache fetch failed');
+            console.warn('[Meteor Scatter] Path elevation API request failed.');
         }
 
         if (!elevs || elevs.length === 0) {
-            console.warn('[Meteor Scatter] Elevation APIs overloaded. Returning flat terrain temporarily.');
-            return pts.map(() => 0); 
+            elevs = pts.map(() => 0); 
+            isFallback = true;
         }
 
-        _pathElevCache[cacheKey] = elevs;
+        elevs.isFallback = isFallback;
+        cache[cacheKey] = { 
+            ts: Date.now(), 
+            elevs: Array.from(elevs),
+            isFallback: isFallback 
+        };
+        savePathCache(cache);
+
         return elevs;
     }
 
@@ -933,8 +1078,6 @@
         ctx.fillStyle = '#1e3050'; ctx.fill(); 
         ctx.strokeStyle = '#2a4a7a'; ctx.lineWidth = 2; ctx.stroke();
 
-        let highestRenderM = meteorAltM + 5000;
-
         // LAYER 2: Line of Sight Lines
         ctx.beginPath();
         losFloor.forEach((pt, i) => i === 0 ? ctx.moveTo(mapX(pt.x), mapY(pt.hrx)) : ctx.lineTo(mapX(pt.x), mapY(pt.hrx)));
@@ -994,6 +1137,13 @@
                 ctx.strokeStyle = '#2a4a7a'; ctx.lineWidth = 1.5;
                 ctx.beginPath(); ctx.moveTo(screenX, h - padB); ctx.lineTo(screenX, h - padB + 4); ctx.stroke();
             }
+        }
+
+        if (elevs && elevs.isFallback) {
+            ctx.fillStyle = 'rgba(255, 100, 100, 0.85)';
+            ctx.font = 'bold 11px sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText('⚠️ Fallback: flat terrain (API overloaded)', padL + 10, padT + 15);
         }
 
         if (profMinX <= 0)      { ctx.fillStyle = '#adf'; ctx.textAlign = 'center'; ctx.fillText('RX', mapX(0),       h - padB + 12); }
@@ -1113,47 +1263,118 @@
         });
     }
 
-    // ── Scoring ───────────────────────────────────────────────────────────
+    // ── Scoring ──────────────────────────────────��────────────────────────
     function calcMeteorScatter(rxLat, rxLon, tx, ctx) {
         const dist = haversineKm(rxLat, rxLon, tx.lat, tx.lon);
         if (dist < S.minDistKm || dist > S.maxDistKm) return null;
 
         const txBrg = bearingDeg(rxLat, rxLon, tx.lat, tx.lon);
+        
         let score = 100;
+        
+        const breakdown = {
+            base: 100,
+            distPen: 0,
+            erpBonus: 0,
+            rotorPen: 0,       // New: Rotor off-axis penalty
+            terrainPen: 0,     // New: Terrain blocking penalty
+            showerMode: ctx.showerMode,
+            showerAlign: 1.0,
+            showerElev: 1.0,
+            showerZhr: 1.0,
+            sporadic: ctx.sporadicMulti,
+            sun: 1.0
+        };
 
-        if (dist < 1200) score -= (1200 - dist) * 0.05;
-        if (dist > 1600) score -= (dist - 1600) * 0.05;
+        // --- 1. Distance Penalty ---
+        // Penalize very short or very long paths
+        if (dist < 1200) breakdown.distPen = -((1200 - dist) * 0.05);
+        if (dist > 1600) breakdown.distPen = -((dist - 1600) * 0.05);
+        score += breakdown.distPen;
 
-        score += Math.min(15, Math.log10(Math.max(1e-6, tx.erp)) * 5);
+        // --- 2. ERP Bonus ---
+        breakdown.erpBonus = Math.min(15, Math.log10(Math.max(1e-6, tx.erp)) * 5);
+        score += breakdown.erpBonus;
 
+        // --- 3. Antenna Beamwidth & Rotor Penalty ---
+        if (rotorAzDeg !== null && rotorAzDeg !== undefined) {
+            const diff = Math.abs(txBrg - rotorAzDeg);
+            const adiff = Math.min(diff, 360 - diff);
+            const halfBeam = (S.beamwidth || 50) / 2;
+            
+            if (adiff > halfBeam) {
+                // Drastic gain penalty for being outside the main lobe (e.g., -2.5 points per degree off-beam)
+                breakdown.rotorPen = -((adiff - halfBeam) * 2.5);
+                score += breakdown.rotorPen;
+            }
+        }
+
+        // --- 4. Real Terrain Blocking Approximation ---
+        // Uses the fetched tx.terrainM and rxTerrainM to calculate Radio Horizon
+        const rxAlt = (rxTerrainM || 0) + (S.rxAglM || 10);
+        const txAlt = (tx.terrainM || 0) + (S.txAglM || 150);
+        
+        // Standard radio horizon formula (approx): 4.12 * sqrt(height_in_meters)
+        const radioHorizonRx = 4.12 * Math.sqrt(Math.max(0, rxAlt));
+        const radioHorizonTx = 4.12 * Math.sqrt(Math.max(0, txAlt));
+        
+        // Max theoretical scatter distance based on meteor layer height (~95-100km) is around 2200km.
+        // We add the radio horizons to the base maximum geometric scatter distance (approx 2000km).
+        const maxScatterDist = 2000 + radioHorizonRx + radioHorizonTx; 
+        
+        if (dist > maxScatterDist) {
+            // Apply a drastic penalty if the station is physically blocked by earth curvature/terrain
+            breakdown.terrainPen = -40; 
+            score += breakdown.terrainPen;
+        }
+
+        // --- 5. Meteor Shower vs Sporadic Math ---
         if (ctx.showerMode && ctx.radiantAz !== null) {
+            // Alignment with radiant ideal lines
             const diff1 = Math.abs(txBrg - ctx.ideal1), adiff1 = Math.min(diff1, 360 - diff1);
             const diff2 = Math.abs(txBrg - ctx.ideal2), adiff2 = Math.min(diff2, 360 - diff2);
             const minDiff = Math.min(adiff1, adiff2);
 
             const alignment = gaussianAlignment(minDiff, 45);
-            score *= (0.25 + 0.75 * alignment);
+            breakdown.showerAlign = (0.25 + 0.75 * alignment);
+            score *= breakdown.showerAlign;
 
             if (ctx.radiantAlt !== null) {
-                const elevFactor = 0.4 + 0.6 * Math.max(0, Math.sin(ctx.radiantAlt * PI_180));
-                score *= elevFactor;
+                // Refined Radiant Elevation Model: Optimal geometry is mid-elevation (~20-60 degrees).
+                // Straight overhead (90 deg) is slightly worse for forward scatter than mid-elevation.
+                // We use a Gaussian bell curve centered around 45 degrees.
+                const optimalAlt = 45;
+                const altDiff = Math.abs(ctx.radiantAlt - optimalAlt);
+                // Gaussian drop-off from 45 degrees, dropping to ~0.5 at 0 or 90 degrees
+                breakdown.showerElev = 0.5 + 0.5 * Math.exp(-Math.pow(altDiff / 35, 2));
+                
+                // If radiant is below horizon, severely penalize (but allow slight over-the-horizon scatter)
+                if (ctx.radiantAlt < 0) {
+                    breakdown.showerElev *= Math.max(0.1, 1.0 - Math.abs(ctx.radiantAlt) * 0.1);
+                }
+                score *= breakdown.showerElev;
             }
 
-            const zhrFactor = 0.4 + 0.6 * Math.min(1, ctx.zhr / 100);
-            score *= zhrFactor;
+            // Apply calculated effective ZHR factor (includes peak proximity)
+            breakdown.showerZhr = 0.4 + 0.6 * Math.min(1, ctx.effectiveZhr / 100);
+            score *= breakdown.showerZhr;
+        } else {
+            // Apply Sporadic Background Model
+            score *= breakdown.sporadic;
         }
 
-        score *= ctx.diurnalMulti;
-
+        // --- 6. Sun Weighting (Daytime absorption) ---
         if (ctx.sunWeighting && ctx.sunAltDeg !== null && ctx.sunAltDeg !== undefined) {
             const sunAlt = clamp(ctx.sunAltDeg, -18, 20);
             const t = (sunAlt + 18) / (20 + 18);
-            const sunFactor = 1.10 + (0.95 - 1.10) * t;
-            score *= sunFactor;
+            breakdown.sun = 1.10 + (0.95 - 1.10) * t;
+            score *= breakdown.sun;
         }
 
+        // --- 7. Final Score Clamping ---
         score = clamp(Math.round(score), 0, 100);
 
+        // --- 8. Elevation Angle Calculation (Geometric) ---
         const pseudoRand = (Math.sin(tx.lat * 12345 + tx.lon) + 1) / 2;
         const altM = (S.meteorAltKm * 1000) - 5000 + (pseudoRand * 10000); 
 
@@ -1164,7 +1385,7 @@
 
         if (elevAngleDeg < 0.5) return null;
 
-        return { tx, mid, dist, elevAngleDeg, score, txBrg };
+        return { tx, mid, dist, elevAngleDeg, score, txBrg, breakdown };
     }
 
     function computeCutoff(sortedCands) {
@@ -1233,17 +1454,46 @@
 
         if (rotorAzDeg === null || rotorAzDeg === undefined) return;
 
-        const p = deadReckonRad(currentRx.lat, currentRx.lon, rotorAzDeg, 2000);
-        const poly = L.polyline([[currentRx.lat, currentRx.lon], [p.lat, p.lon]], {
-            color: '#ff0000',
-            weight: 3,
-            opacity: 0.85
-        }).addTo(rotorLayer);
+        const halfBeam = (S.beamwidth || 50) / 2;
+        
+        const pCenter = deadReckonRad(currentRx.lat, currentRx.lon, rotorAzDeg, 2000);
+        const pLeft = deadReckonRad(currentRx.lat, currentRx.lon, (rotorAzDeg - halfBeam + 360) % 360, 2000);
+        const pRight = deadReckonRad(currentRx.lat, currentRx.lon, (rotorAzDeg + halfBeam) % 360, 2000);
 
-        poly.bindTooltip(`Rotor: ${Math.round(rotorAzDeg)}°`, { sticky: true });
+        // 1. Filled area (Cone/Wedge)
+        const beamArea = L.polygon([
+            [currentRx.lat, currentRx.lon],
+            [pLeft.lat, pLeft.lon],
+            [pRight.lat, pRight.lon]
+        ], {
+            color: 'transparent',
+            fillColor: '#ff0000',
+            fillOpacity: 0.15,
+            interactive: false // <-- Crucial: Allows mouse events to pass through
+        }).addTo(rotorLayer);
+        
+        // Push visually behind the green hotspots
+        beamArea.bringToBack();
+
+        // 2. Dashed boundary lines
+        const leftBorder = L.polyline([[currentRx.lat, currentRx.lon], [pLeft.lat, pLeft.lon]], {
+            color: '#ff0000', weight: 2, opacity: 0.8, dashArray: '5, 8', interactive: false
+        }).addTo(rotorLayer);
+        leftBorder.bringToBack();
+
+        const rightBorder = L.polyline([[currentRx.lat, currentRx.lon], [pRight.lat, pRight.lon]], {
+            color: '#ff0000', weight: 2, opacity: 0.8, dashArray: '5, 8', interactive: false
+        }).addTo(rotorLayer);
+        rightBorder.bringToBack();
+
+        // 3. Solid center line
+        const centerLine = L.polyline([[currentRx.lat, currentRx.lon], [pCenter.lat, pCenter.lon]], {
+            color: '#ff0000', weight: 3, opacity: 0.85, interactive: false
+        }).addTo(rotorLayer);
+        centerLine.bringToBack();
     }
 
-    // ── UI ────────────────────────────────────────────────────────────────
+    // ── UI ───────────────────────────────────────────────────────────────
     function buildSettingsPanel() {
         return `
             <div id="ms-settings-panel">
@@ -1277,6 +1527,9 @@
                     <span class="ms-setting-unit"></span>
                 </div>
 
+                <h5 style="margin-top:10px; cursor: move;">
+                    <span style="color:#ffaa00; pointer-events: none;">Display & Scoring</span>
+                </h5>
                 <div class="ms-setting-row"><label>Target candidates</label><input type="number" id="ms-s-topn" value="${S.targetTopN}"><span class="ms-setting-unit"></span></div>
                 <div class="ms-setting-row"><label>Map draw limit</label><input type="number" id="ms-s-maptopn" value="${S.mapTopN}"><span class="ms-setting-unit"></span></div>
 
@@ -1288,11 +1541,22 @@
                     </select>
                     <span class="ms-setting-unit"></span>
                 </div>
+                
+                <div class="ms-setting-row"><label>Antenna Beamwidth</label><input type="number" id="ms-s-beamwidth" value="${S.rxBeamwidth}"><span class="ms-setting-unit">deg</span></div>
 
                 <h5 style="margin-top:10px; cursor: move;">
                     <span style="color:#ffaa00; pointer-events: none;">Terrain</span>
                 </h5>
 
+                <div class="ms-setting-row">
+                    <label>Terrain Blocking Check</label>
+                    <select id="ms-s-terrain">
+                        <option value="1" ${S.useTerrainBlocking ? 'selected' : ''}>On</option>
+                        <option value="0" ${!S.useTerrainBlocking ? 'selected' : ''}>Off</option>
+                    </select>
+                    <span class="ms-setting-unit"></span>
+                </div>
+				
                 <div class="ms-setting-row"><label>RX antenna height AGL</label><input type="number" id="ms-s-rx-agl" value="${S.rxAglM}"><span class="ms-setting-unit">m</span></div>
                 <div class="ms-setting-row"><label>Assumed TX antenna height AGL</label><input type="number" id="ms-s-tx-agl" value="${S.txAglM}"><span class="ms-setting-unit">m</span></div>
 
@@ -1395,8 +1659,29 @@
                         <tr><td style="color:#889; padding:2px;">Terrain</td><td style="text-align:right; color:#fff;">${fmtAlt(c.tx.terrainM || 0)}</td></tr>
                         <tr><td style="color:#889; padding:2px;">Score</td><td style="text-align:right; color:${color}; font-weight:bold;">${c.score}%</td></tr>
                     </table>
+                    <details style="margin-top:6px; cursor:pointer;" ${isFocused ? 'open' : ''}>
+                        <summary style="color:#ffaa00; font-size:11px;">Score Details</summary>
+                        <div style="font-size:11px; color:#cde; padding-top:4px; line-height:1.3;">
+                            Base: ${c.breakdown.base.toFixed(1)}<br>
+                            Distance: ${c.breakdown.distPen > 0 ? '+' : ''}${c.breakdown.distPen.toFixed(1)}<br>
+                            ERP: +${c.breakdown.erpBonus.toFixed(1)}<br>
+                            ${c.breakdown.rotorPen < 0 ? `Off-Beam Penalty: ${c.breakdown.rotorPen.toFixed(1)}<br>` : ''}
+                            ${c.breakdown.terrainPen < 0 ? `Terrain Blocking: ${c.breakdown.terrainPen.toFixed(1)}<br>` : ''}
+                            ${c.breakdown.showerMode ? `Shower Align: x${c.breakdown.showerAlign.toFixed(2)}<br>` : ''}
+                            ${c.breakdown.showerMode ? `Shower Elev: x${c.breakdown.showerElev.toFixed(2)}<br>` : ''}
+                            ${c.breakdown.showerMode ? `Peak Factor: x${c.breakdown.showerZhr.toFixed(2)}<br>` : ''}
+                            ${!c.breakdown.showerMode ? `Sporadic: x${c.breakdown.sporadic.toFixed(2)}<br>` : ''}
+                            ${c.breakdown.sun !== 1.0 ? `Sun: x${c.breakdown.sun.toFixed(2)}<br>` : ''}
+                        </div>
+                    </details>
                 </div>
-            `, { direction: 'top', sticky: true, opacity: 1 });
+            `, { 
+                direction: 'top', 
+                sticky: !isFocused,     // Follows mouse only when NOT clicked
+                permanent: isFocused,   // Stays permanently visible when clicked
+                interactive: true,      // Allows clicking inside the tooltip
+                opacity: 1 
+            });
             
             txLayer.addLayer(txM);
 
@@ -1436,11 +1721,15 @@
         renderRotorLine();
 
         if (focusedCand) {
-            mapInstance.fitBounds([[currentRx.lat, currentRx.lon], [focusedCand.tx.lat, focusedCand.tx.lon]], { padding: [50, 50], maxZoom: 8 });
+            mapInstance.fitBounds([[currentRx.lat, currentRx.lon], [focusedCand.tx.lat, focusedCand.tx.lon]], { padding: [120, 120], maxZoom: 6 });
         } else if (itemsToDraw.length > 0) {
-            const bounds = L.latLngBounds([currentRx.lat, currentRx.lon]);
-            itemsToDraw.forEach(c => bounds.extend([c.tx.lat, c.tx.lon]));
-            mapInstance.fitBounds(bounds, { padding: [30, 30] });
+            // Finde das am weitesten entfernte Ziel in der aktuellen Auswahl
+            const maxCandDist = Math.max(...itemsToDraw.map(c => c.dist));
+            // Erstelle eine Bounding-Box um deinen Standort mit dem Radius des weitesten Ziels (+50km Rand)
+            const viewRadiusMeters = (maxCandDist + 50) * 1000;
+            const dynamicBounds = L.latLng(currentRx.lat, currentRx.lon).toBounds(viewRadiusMeters);
+            
+            mapInstance.fitBounds(dynamicBounds, { padding: [30, 30], maxZoom: 6 });
             
             // Hide profile
             document.getElementById('ms-profile-panel').style.display = 'none';
@@ -1457,8 +1746,6 @@
         body.innerHTML = '';
 
         const groups = groupCandidatesByLocation(currentCands);
-        
-        // Ensure this defaults to true if S.groupCollapse is truthy
         const collapsedDefault = !!S.groupCollapse;
 
         let focusedGroupKey = null;
@@ -1497,7 +1784,7 @@
             const right = document.createElement('div');
             const bestScore = Math.round(g.bestScore);
             const scoreColor = bestScore >= 80 ? '#ff3300' : bestScore >= 60 ? '#ffaa00' : bestScore >= 40 ? '#eecc00' : '#44cc44';
-            right.innerHTML = `<span style="color:${scoreColor}; font-weight:bold; font-size:18px;">${bestScore}%</span>`;
+            right.innerHTML = `<span style="color:${scoreColor}; font-weight:bold; font-size:18px;" title="${formatBreakdown(g.bestCand.breakdown)}">${bestScore}%</span>`;
 
             hdr.appendChild(left);
             hdr.appendChild(right);
@@ -1505,17 +1792,13 @@
             const groupBody = document.createElement('div');
             groupBody.className = 'ms-group-body';
             
-            // Logic to determine if this specific group should be expanded
             let forceExpand = false;
             if(focusedCand) {
                 if(isFocusedGroup) forceExpand = true;
             }
             
-            // If it's forced to expand (because it's focused) OR if collapsedDefault is false, show it.
-            // Since we WANT them collapsed by default, if collapsedDefault is TRUE, and it's not focused, it should be 'none'.
             groupBody.style.display = (forceExpand || !collapsedDefault) ? 'block' : 'none';
             
-            // Sync the header class with the initial display state
             if (groupBody.style.display === 'block') {
                  hdr.classList.add('expanded');
             } else {
@@ -1524,7 +1807,6 @@
 
             hdr.onclick = () => {
                 const isHidden = groupBody.style.display === 'none';
-                
                 if (isHidden) {
                     groupBody.style.display = 'block';
                     hdr.classList.add('expanded');
@@ -1550,19 +1832,20 @@
                 const ps = (c.tx.ps || c.tx.station || '').trim();
                 const psLabel = ps ? ps : '—';
                 const freqNum = Number(c.tx.freq);
+                const freqKey = freqNum.toFixed(2);
                 const txIdStr = (c.tx.id !== undefined && c.tx.id !== null) ? `'${c.tx.id}'` : 'null';
                 const itemScoreColor = c.score >= 80 ? '#ff3300' : c.score >= 60 ? '#ffaa00' : c.score >= 40 ? '#eecc00' : '#44cc44';
 
                 row.innerHTML = `
                     <div class="ms-prog-left">
                         <i class="fas fa-play ms-stream-btn" style="color:#4aaeff; font-size:13px; cursor:pointer;" onclick="(function(e){ e.stopPropagation(); if(${txIdStr}) window._msHandleStreamClick(${txIdStr}, '${psLabel.replace(/'/g,"\\'")}', e.currentTarget); else alert('No stream ID'); })(event)"></i>
-                        <div class="ms-freq" data-freq="${freqNum}">${freqNum.toFixed(2)} MHz</div>
+                        <div class="ms-freq" data-freq="${freqNum}">${freqKey} MHz</div>
                         <div class="ms-ps" title="${psLabel}">${psLabel}</div>
                     </div>
                     <div class="ms-prog-right">
                         <div class="ms-pol">${c.tx.pol || '—'}</div>
                         <div class="ms-erp">${Math.round(c.tx.erp)} kW</div>
-                        <div class="ms-score" style="color:${itemScoreColor}; text-align:right;">${Math.round(c.score)}%</div>
+                        <div class="ms-score" style="color:${itemScoreColor}; text-align:right;" title="${formatBreakdown(c.breakdown)}">${Math.round(c.score)}%</div>
                     </div>
                 `;
 
@@ -1602,13 +1885,21 @@
         currentRx = rx;
 
         await ensureRxTerrain(rx);
+        await fetchLiveRadar();
         
         const filterFreqs = await fetchFrequencyList(S.filterMode);
 
         const now = new Date();
 
         const localHour = getLocalSolarHour(rx.lon, now);
-        const diurnalMulti = 0.7 + 0.8 * Math.exp(-Math.pow((localHour - 6) / 3.2, 2));
+        // Sporadic Model: Diurnal variation (peaks at ~06:00 local, lowest at ~18:00 local)
+        const diurnalMulti = 0.6 + 0.4 * Math.cos((localHour - 6) * Math.PI / 12);
+        
+        // Sporadic Model: Seasonal variation (Northern hemisphere assumption, peaking in autumn)
+        const currentMonth = now.getMonth(); // 0-indexed
+        const seasonalMulti = 0.8 + 0.2 * Math.sin((currentMonth - 8) * Math.PI / 6);
+
+        const sporadicMulti = diurnalMulti * seasonalMulti;
 
         const activeShower = getActiveShower(now);
         const sunAltDeg = getSunAltDeg(rx.lat, rx.lon, now);
@@ -1618,11 +1909,13 @@
             radiantAz: null,
             radiantAlt: null,
             zhr: 0,
+            effectiveZhr: 0,
             ideal1: null,
             ideal2: null,
-            diurnalMulti,
+            sporadicMulti,
             sunAltDeg,
             sunWeighting: !!S.sunWeighting,
+            liveRadar: liveRadarMultiplier
         };
 
         if (activeShower) {
@@ -1631,6 +1924,13 @@
             ctx.radiantAz = azAlt.az;
             ctx.radiantAlt = azAlt.alt;
             ctx.zhr = activeShower.zhr;
+            
+            // Refined Shower Model: Proximity to peak date as a smooth Gaussian curve
+            const daysFromPeak = daysBetweenMMDD(now.getMonth() + 1, now.getDate(), activeShower.peak[0], activeShower.peak[1]);
+            const durationDays = Math.max(1, daysBetweenMMDD(activeShower.start[0], activeShower.start[1], activeShower.end[0], activeShower.end[1]) / 2);
+            const peakFactor = Math.exp(-Math.pow(daysFromPeak / (durationDays * 0.5), 2));
+            ctx.effectiveZhr = Math.max(5, activeShower.zhr * peakFactor); // minimum residual ZHR during active period
+            
             ctx.ideal1 = (azAlt.az + 90) % 360;
             ctx.ideal2 = (azAlt.az + 270) % 360;
 
@@ -1650,6 +1950,14 @@
 
         cands.sort((a, b) => b.score - a.score);
 
+        // Optional Step: Apply Terrain Blocking only to the top candidates to save thousands of API calls
+        if (S.useTerrainBlocking) {
+            const topForTerrain = cands.slice(0, 150);
+            await calculateHorizonBlocking(rx, topForTerrain);
+            // Resort them after applying penalties
+            cands.sort((a, b) => b.score - a.score);
+        }
+
         // 2. Compute Cutoff and Limits as if the filter is OFF
         const cutoff = computeCutoff(cands);
         cands = cands.filter(c => c.score >= cutoff);
@@ -1657,7 +1965,7 @@
         const hardCap = clamp(parseInt(S.targetTopN, 10) || 80, 10, 500) * 3;
         if (cands.length > hardCap) cands = cands.slice(0, hardCap);
 
-        // 3. NOW apply the Blacklist/Whitelist filter (only reduces existing results)
+        // 3. NOW apply the Blacklist/Whitelist filter
         if (S.filterMode !== 'none' && filterFreqs.size > 0) {
             cands = cands.filter(c => {
                 const freqNum = Math.round(c.tx.freq * 100);
@@ -1691,7 +1999,7 @@
         if (statEl) {
             statEl.innerHTML = `
                 <div style="display:flex; justify-content:space-between; width:100%; gap:10px; flex-wrap:wrap;">
-                    <span><b>Time:</b> <span style="color:#fff;">${timeStr}</span> | <b>Hotspots:</b> <span style="color:#fff;">${currentCands.length}</span> | <b>Cutoff:</b> <span style="color:#ffaa00;">${cutoffStr}</span></span>
+                    <span><b>Time:</b> <span style="color:#fff;">${timeStr}</span> | <b>Hotspots:</b> <span style="color:#fff;">${currentCands.length}</span> | <b>Radar:</b> <span style="color:#ffaa00;">${liveRadarStatus} (x${liveRadarMultiplier.toFixed(1)})</span></span>
                     <span><b>RX Terrain:</b> <span style="color:#fff;">${rxTerrStr}</span> | <b>Sun Alt:</b> <span style="color:#fff;">${sunStr}</span> | <b>Rotor:</b> <span id="ms-rotor-val" style="color:#4aaeff;">${rotorStr}</span></span>
                     <span><b>Shower:</b> <span style="color:#fff;">${showerStr}</span></span>
                 </div>
@@ -1812,11 +2120,18 @@
                 <div id="ms-map">
                     <div id="ms-leaflet-wrap"></div>
                     <div id="ms-profile-panel">
-                        <div class="ms-sub-header">
-                            <div class="ms-sub-title" style="overflow: visible !important;">⛰️ Elevation Profile</div>
-                            <button id="ms-profile-close" class="ms-sub-close" style="transform:translateX(340px);">✕</button>
-                        </div>
-                        <div style="position:relative;flex:1;width:100%;display:flex;">
+                        <!-- Bulletproof Header using a Table -->
+                        <table style="width: 100% !important; height: 38px !important; background: var(--color-2, #162032) !important; border-bottom: 1px solid #1e3050 !important; border-collapse: collapse !important; margin: 0 !important; padding: 0 !important; flex-shrink: 0 !important;">
+                            <tr>
+                                <td style="padding: 0 14px !important; text-align: left !important; vertical-align: middle !important; width: auto !important; border: none !important;">
+                                    <div class="ms-sub-title" style="margin: 0 !important;">⛰️ Elevation Profile</div>
+                                </td>
+                                <td style="padding: 0 14px !important; text-align: right !important; vertical-align: middle !important; width: 40px !important; border: none !important;">
+                                    <button id="ms-profile-close" class="ms-sub-close" style="margin: 0 !important; padding: 0 !important; transform: none !important; position: static !important;">✕</button>
+                                </td>
+                            </tr>
+                        </table>
+                        <div style="position:relative; flex:1; width:100%; display:flex;">
                             <canvas id="ms-profile-canvas"></canvas>
                             <div id="ms-profile-y-zoom-container" title="Vertical Zoom (Double-click to reset)">
                                 <input type="range" id="ms-profile-y-zoom" min="0.2" max="4.0" step="0.1" value="1.0">
@@ -1909,6 +2224,9 @@
 
             S.sunWeighting = parseInt(document.getElementById('ms-s-sun-weighting').value) ? 1 : 0;
 
+            S.rxBeamwidth = parseInt(document.getElementById('ms-s-beamwidth').value);
+            S.useTerrainBlocking = parseInt(document.getElementById('ms-s-terrain').value) ? 1 : 0;
+
             S.rxAglM = parseInt(document.getElementById('ms-s-rx-agl').value);
             S.txAglM = parseInt(document.getElementById('ms-s-tx-agl').value);
 
@@ -1916,6 +2234,8 @@
             
             S.useMetric = document.getElementById('ms-s-metric').checked;
             S.autoRightAlign = document.getElementById('ms-s-rightalign').checked;
+			
+			S.beamwidth = parseInt(document.getElementById('ms-s-beamwidth').value) || 50;
 
             localStorage.setItem('ms_min_dist', S.minDistKm);
             localStorage.setItem('ms_max_dist', S.maxDistKm);
@@ -1929,6 +2249,9 @@
             localStorage.setItem('ms_map_topn', S.mapTopN);
 
             localStorage.setItem('ms_sun_weighting', S.sunWeighting);
+            
+            localStorage.setItem('ms_rx_beamwidth', S.rxBeamwidth);
+            localStorage.setItem('ms_use_terrain_blocking', S.useTerrainBlocking);
 
             localStorage.setItem('ms_rx_agl_m', S.rxAglM);
             localStorage.setItem('ms_tx_agl_m', S.txAglM);
@@ -1937,6 +2260,8 @@
             
             localStorage.setItem('ms_use_metric', S.useMetric);
             localStorage.setItem('ms_auto_right_align', S.autoRightAlign);
+
+            localStorage.setItem('ms_beamwidth', S.beamwidth);
 
             document.getElementById('ms-settings-panel').style.display = 'none';
             
@@ -1964,6 +2289,9 @@
             
             document.getElementById('ms-s-sun-weighting').value = "1";
             
+            document.getElementById('ms-s-beamwidth').value = 50;
+            document.getElementById('ms-s-terrain').value = "1";
+
             document.getElementById('ms-s-rx-agl').value = 10;
             document.getElementById('ms-s-tx-agl').value = 150;
             

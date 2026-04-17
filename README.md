@@ -5,15 +5,12 @@ Predicts and visualizes optimal real-time hotspots for receiving distant FM radi
 <img width="450" height="400" alt="Screenshot 2026-04-16 234427" src="https://github.com/user-attachments/assets/c6a0d61d-2bea-4bca-a7f3-54244530cdc7" />
 
 
+## Version 1.1 (Only compatible with FM DX Webserver version 1.4.0 and above !!!)
 
-## Version 1.0 (Only compatible with FM DX Webserver version 1.4.0 and above !!!)
-
-- Meteor Scatter Prediction Engine: Core geometry and astronomy algorithms implemented for calculating optimal 95km reflection midpoints
-- Shower Tracking: Automatic tracking of major annual meteor showers (Quadrantids, Lyrids, Eta Aquariids, Perseids, Orionids, Leonids, Geminids) with radiant-based forward scatter lines
-- Diurnal & Sun Modeling: Scoring system accounts for Earth's leading edge and solar altitude
-- Server-Side Caching: High-performance TX and Elevation database caching via meteorscatter_server.js
-- Interactive UI: Live Leaflet map with hotspot markers, grouped list panel, and integrated audio streaming
-- Frequency Filtering: Support for whitelist/blacklist to hide local splatter frequencies
+- Live Radar Model: Added server-side simulated radar data (via /api/meteorscatter/live_radar) that feeds dynamic scoring multipliers based on background bursts
+- Antenna Beamwidth & Rotor Penalties: Hotspots outside the defined antenna beamwidth (when connected to a PST Rotator) receive massive scoring penalties. The beamwidth is visualized as a red cone overlay on the map
+- Terrain Blocking Checks: Optional checking algorithm (3km and 10km path horizon checks) penalizes candidates that are physically obstructed by terrain
+- Refined Shower Model: Gaussian modeling of the proximity to meteor shower peak dates and radiant elevation modeling (rewards mid-elevation alignments)
 
 ## Installation notes
 
@@ -49,3 +46,11 @@ If you have any questions, would like to report problems, or have suggestions fo
 <details>
 <summary>History</summary>
 
+### Version 1.0 (Only compatible with FM DX Webserver version 1.4.0 and above !!!)
+
+- Meteor Scatter Prediction Engine: Core geometry and astronomy algorithms implemented for calculating optimal 95km reflection midpoints
+- Shower Tracking: Automatic tracking of major annual meteor showers (Quadrantids, Lyrids, Eta Aquariids, Perseids, Orionids, Leonids, Geminids) with radiant-based forward scatter lines
+- Diurnal & Sun Modeling: Scoring system accounts for Earth's leading edge and solar altitude
+- Server-Side Caching: High-performance TX and Elevation database caching via meteorscatter_server.js
+- Interactive UI: Live Leaflet map with hotspot markers, grouped list panel, and integrated audio streaming
+- Frequency Filtering: Support for whitelist/blacklist to hide local splatter frequencies
