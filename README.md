@@ -1,9 +1,8 @@
 # Meteor Scatter Plugin
 Predicts and visualizes optimal real-time hotspots for receiving distant FM radio signals reflected off ionized meteor trails by analyzing astronomical data, active meteor showers, and transmitter geometries.
 
-<img width="500" height="300" alt="Screenshot 2026-04-16 234152" src="https://github.com/user-attachments/assets/709184a7-ff14-455d-96ad-f01c344abf55" />
-<img width="450" height="400" alt="Screenshot 2026-04-16 234427" src="https://github.com/user-attachments/assets/c6a0d61d-2bea-4bca-a7f3-54244530cdc7" />
-
+<img width="520" height="310" alt="Screenshot 2026-04-17 120508" src="https://github.com/user-attachments/assets/1bf67823-6131-467a-be3d-1e5bdcd0b54f" />
+<img width="450" height="400" alt="Screenshot 2026-04-17 120242" src="https://github.com/user-attachments/assets/4bd714dc-1b1f-46b0-bd62-0cbc993282f2" />
 
 ## Version 1.1 (Only compatible with FM DX Webserver version 1.4.0 and above !!!)
 
